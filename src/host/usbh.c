@@ -1723,6 +1723,33 @@ enum {
   ENUM_CONFIG_DRIVER
 };
 
+// Decode bMaxPacketSize0, which is NOT the same field in USB 2.x and USB 3.x:
+// 2.x gives a literal byte count, 3.x gives a power-of-two exponent (9 => 512).
+// A SuperSpeed-capable device keeps reporting its 3.x device descriptor after
+// falling back to FS/HS, so taking the raw value programs EP0 with a nonsense
+// max packet size -- a USB 3.x device reporting bcdUSB 0x0310 with
+// bMaxPacketSize0 = 9 had EP0 opened at 9 bytes and then failed every
+// control IN with a data overrun (EHCI error counter saturating at 3) until
+// enumeration gave up.
+//
+// Deliberately scoped to USB 3.x descriptors only. A 2.x device's reported
+// value is passed through untouched, so this cannot alter the behaviour of any
+// device that enumerates correctly today. Reported upstream as
+// hathach/tinyusb#3930.
+static uint8_t enum_ep0_size(const tusb_desc_device_t *desc_device) {
+  uint8_t ep0_size = desc_device->bMaxPacketSize0;
+
+  if (tu_le16toh(desc_device->bcdUSB) >= 0x0300 && ep0_size <= 9) {
+    const uint16_t decoded = (uint16_t) (1u << ep0_size);
+    // EP0 is 8/16/32/64 below SuperSpeed: a device that asks for 512 is
+    // reporting its SuperSpeed descriptor on an FS/HS link, and 64 is the
+    // largest size actually available to it.
+    ep0_size = (uint8_t) (decoded > 64 ? 64 : decoded);
+  }
+
+  return ep0_size;
+}
+
 static uint8_t enum_get_new_address(bool is_hub);
 static bool    enum_parse_configuration_desc(uint8_t dev_addr, const tusb_desc_configuration_t *desc_cfg);
 static void    enum_full_complete(bool success);
@@ -1931,7 +1958,7 @@ static void process_enumeration(tuh_xfer_t *xfer) {
       usbh_device_t* new_dev = get_device(new_addr);
       new_dev->bus_info = *dev0_bus;
       new_dev->connected = 1;
-      new_dev->desc_device.bMaxPacketSize0 = desc_device->bMaxPacketSize0;
+      new_dev->desc_device.bMaxPacketSize0 = enum_ep0_size(desc_device);
 
       TU_ASSERT(tuh_address_set(0, new_addr, process_enumeration, ENUM_GET_DEVICE_DESC), );
       break;
